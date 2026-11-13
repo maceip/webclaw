@@ -1,5 +1,9 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { acquireGatewayClient, gatewayRpcShared } from '../../server/gateway'
+import {
+  getAutoplanBaseUrl,
+  isOpenClawGatewayConfigured,
+} from '../../server/autoplan'
 
 type StreamEventPayload = {
   event: string
@@ -11,8 +15,40 @@ type StreamEventPayload = {
 export const Route = createFileRoute('/api/stream')({
   server: {
     handlers: {
-      GET: ({ request }) => {
+      GET: async ({ request }) => {
         const url = new URL(request.url)
+
+        if (!isOpenClawGatewayConfigured()) {
+          const upstreamUrl = `${getAutoplanBaseUrl()}/api/webclaw/stream${url.search}`
+          try {
+            const upstream = await fetch(upstreamUrl, {
+              headers: { Accept: 'text/event-stream' },
+              signal: request.signal,
+            })
+            return new Response(upstream.body, {
+              status: upstream.status,
+              headers: {
+                'Content-Type': 'text/event-stream',
+                'Cache-Control': 'no-cache',
+                Connection: 'keep-alive',
+              },
+            })
+          } catch (err) {
+            const encoder = new TextEncoder()
+            const message = err instanceof Error ? err.message : String(err)
+            const body = encoder.encode(
+              `data: ${JSON.stringify({ event: 'error', payload: message })}\n\n`,
+            )
+            return new Response(body, {
+              status: 200,
+              headers: {
+                'Content-Type': 'text/event-stream',
+                'Cache-Control': 'no-cache',
+              },
+            })
+          }
+        }
+
         const sessionKey = url.searchParams.get('sessionKey')?.trim() || ''
         const friendlyId = url.searchParams.get('friendlyId')?.trim() || ''
         const encoder = new TextEncoder()

@@ -2,6 +2,10 @@ import { randomUUID } from 'node:crypto'
 import { createFileRoute } from '@tanstack/react-router'
 import { json } from '@tanstack/react-start'
 import { gatewayRpc, gatewayRpcShared } from '../../server/gateway'
+import {
+  isOpenClawGatewayConfigured,
+  proxyAutoplanJson,
+} from '../../server/autoplan'
 
 type SessionsResolveResponse = {
   ok?: boolean
@@ -13,6 +17,14 @@ export const Route = createFileRoute('/api/send')({
     handlers: {
       POST: async ({ request }) => {
         try {
+          if (!isOpenClawGatewayConfigured()) {
+            const rawBody = await request.text()
+            return await proxyAutoplanJson('/api/webclaw/send', {
+              method: 'POST',
+              body: rawBody || '{}',
+            })
+          }
+
           const body = (await request.json().catch(() => ({}))) as Record<
             string,
             unknown

@@ -94,6 +94,10 @@ export function normalizeSessions(
           ? session.derivedTitle
           : undefined,
       label: typeof session.label === 'string' ? session.label : undefined,
+      service:
+        typeof session.service === 'string' ? session.service : undefined,
+      model: typeof session.model === 'string' ? session.model : undefined,
+      cwd: typeof session.cwd === 'string' ? session.cwd : undefined,
       updatedAt:
         typeof session.updatedAt === 'number' ? session.updatedAt : undefined,
       lastMessage: session.lastMessage ?? null,

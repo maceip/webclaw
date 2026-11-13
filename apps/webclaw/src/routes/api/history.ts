@@ -1,6 +1,10 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { json } from '@tanstack/react-start'
 import { gatewayRpc } from '../../server/gateway'
+import {
+  isOpenClawGatewayConfigured,
+  proxyAutoplanJson,
+} from '../../server/autoplan'
 
 type ChatHistoryResponse = {
   sessionKey: string
@@ -20,6 +24,10 @@ export const Route = createFileRoute('/api/history')({
       GET: async ({ request }) => {
         try {
           const url = new URL(request.url)
+          if (!isOpenClawGatewayConfigured()) {
+            return await proxyAutoplanJson(`/api/webclaw/history${url.search}`)
+          }
+
           const limit = Number(url.searchParams.get('limit') || '200')
           const rawSessionKey = url.searchParams.get('sessionKey')?.trim()
           const friendlyId = url.searchParams.get('friendlyId')?.trim()

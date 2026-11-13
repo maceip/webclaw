@@ -24,6 +24,8 @@ import { ChatHeader } from './components/chat-header'
 import { ChatMessageList } from './components/chat-message-list'
 import { ChatComposer } from './components/chat-composer'
 import { GatewayStatusMessage } from './components/gateway-status-message'
+import { AutoplanInspector } from './components/autoplan-inspector'
+import type { AgentServiceInfo } from './components/autoplan-inspector'
 import {
   hasPendingGeneration,
   hasPendingSend,
@@ -57,6 +59,19 @@ type ChatScreenProps = {
   forcedSessionKey?: string
 }
 
+type AgentsApiResponse = {
+  success?: boolean
+  services?: Array<AgentServiceInfo>
+  default_service?: string
+}
+
+type QueueStatsResponse = {
+  success?: boolean
+  chief?: {
+    llm_status?: string
+  }
+}
+
 export function ChatScreen({
   activeFriendlyId,
   isNewChat = false,
@@ -68,6 +83,9 @@ export function ChatScreen({
   const [sending, setSending] = useState(false)
   const [creatingSession, setCreatingSession] = useState(false)
   const [isRedirecting, setIsRedirecting] = useState(false)
+  const [newChatService, setNewChatService] = useState<string>('')
+  const [busyDemoService, setBusyDemoService] = useState<string | null>(null)
+  const [dispatchError, setDispatchError] = useState<string>('')
   const { headerRef, composerRef, mainRef, pinGroupMinHeight, headerHeight } =
     useChatMeasurements()
   const [waitingForResponse, setWaitingForResponse] = useState(
@@ -107,6 +125,34 @@ export function ChatScreen({
     queryClient,
   })
 
+  const agentsQuery = useQuery({
+    queryKey: ['autoplan', 'agents'],
+    queryFn: async (): Promise<AgentsApiResponse> => {
+      const res = await fetch('/api/autoplan/agents')
+      if (!res.ok) throw new Error(await readError(res))
+      return (await res.json()) as AgentsApiResponse
+    },
+    refetchInterval: 8000,
+  })
+
+  const queueStatsQuery = useQuery({
+    queryKey: ['autoplan', 'queue-stats'],
+    queryFn: async (): Promise<QueueStatsResponse> => {
+      const res = await fetch('/api/autoplan/queue/stats')
+      if (!res.ok) throw new Error(await readError(res))
+      return (await res.json()) as QueueStatsResponse
+    },
+    refetchInterval: 8000,
+  })
+
+  const services = agentsQuery.data?.services ?? []
+  const defaultService =
+    agentsQuery.data?.default_service ?? services[0]?.service ?? 'antigravity'
+  const selectedService = isNewChat
+    ? newChatService || defaultService
+    : activeSession?.service || defaultService
+  const chiefLlmStatus = queueStatsQuery.data?.chief?.llm_status ?? ''
+
   const { exportConversation } = useExport({
     currentFriendlyId: activeFriendlyId,
     currentSessionKey: sessionKeyForHistory,
@@ -143,6 +189,8 @@ export function ChatScreen({
     void gatewayStatusQuery.refetch()
   }, [gatewayStatusQuery])
   const isSidebarCollapsed = uiQuery.data.isSidebarCollapsed
+  const isInspectorOpen = uiQuery.data.isInspectorOpen
+
   const handleActiveSessionDelete = useCallback(() => {
     setIsRedirecting(true)
     navigate({ to: '/new', replace: true })
@@ -163,6 +211,10 @@ export function ChatScreen({
   const refreshHistory = useCallback(() => {
     void historyQuery.refetch()
   }, [historyQuery])
+
+  const refreshAgents = useCallback(() => {
+    void agentsQuery.refetch()
+  }, [agentsQuery])
 
   const hideUi = shouldRedirectToNew || isRedirecting
 
@@ -223,6 +275,44 @@ export function ChatScreen({
     }
   }, [finishAllRuns])
 
+  const handleSelectService = useCallback(
+    async (nextService: string) => {
+      setDispatchError('')
+      if (isNewChat) {
+        setNewChatService(nextService)
+        return
+      }
+      const sessionKeyTarget =
+        forcedSessionKey ||
+        resolvedSessionKey ||
+        activeSessionKey ||
+        activeFriendlyId
+      try {
+        const res = await fetch('/api/sessions', {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            sessionKey: sessionKeyTarget,
+            friendlyId: activeFriendlyId,
+            service: nextService,
+          }),
+        })
+        if (!res.ok) throw new Error(await readError(res))
+        await queryClient.invalidateQueries({ queryKey: chatQueryKeys.sessions })
+      } catch (err) {
+        setDispatchError(err instanceof Error ? err.message : String(err))
+      }
+    },
+    [
+      activeFriendlyId,
+      activeSessionKey,
+      forcedSessionKey,
+      isNewChat,
+      queryClient,
+      resolvedSessionKey,
+    ],
+  )
+
   function sendMessage(
     sessionKey: string,
     friendlyId: string,
@@ -230,6 +320,7 @@ export function ChatScreen({
     skipOptimistic = false,
     attachments?: Array<AttachmentFile>,
   ) {
+    setDispatchError('')
     let optimisticClientId = ''
     if (!skipOptimistic) {
       const { clientId, optimisticMessage } = createOptimisticMessage(
@@ -267,6 +358,7 @@ export function ChatScreen({
       body: JSON.stringify({
         sessionKey,
         friendlyId,
+        service: selectedService,
         message: body,
         thinking: settings.thinkingLevel,
         idempotencyKey: randomUUID(),
@@ -285,6 +377,7 @@ export function ChatScreen({
           startRun(payload.runId.trim())
         }
         refreshHistory()
+        window.dispatchEvent(new CustomEvent('autoplan:event'))
       })
       .catch((err) => {
         const messageText = err instanceof Error ? err.message : String(err)
@@ -292,6 +385,7 @@ export function ChatScreen({
           navigate({ to: '/connect', replace: true })
           return
         }
+        setDispatchError(messageText)
         if (optimisticClientId) {
           updateHistoryMessageByClientId(
             queryClient,
@@ -306,44 +400,121 @@ export function ChatScreen({
         setPendingGeneration(false)
         setWaitingForResponse(false)
         setPinToTop(false)
+        refreshHistory()
       })
       .finally(() => {
         setSending(false)
       })
   }
 
-  const createSessionForMessage = useCallback(async () => {
-    setCreatingSession(true)
-    try {
-      const res = await fetch('/api/sessions', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({}),
-      })
-      if (!res.ok) throw new Error(await readError(res))
+  const createSessionForMessage = useCallback(
+    async (serviceOverride?: string) => {
+      setCreatingSession(true)
+      try {
+        const res = await fetch('/api/sessions', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            service: serviceOverride || selectedService,
+          }),
+        })
+        if (!res.ok) throw new Error(await readError(res))
 
-      const data = (await res.json()) as {
-        sessionKey?: string
-        friendlyId?: string
+        const data = (await res.json()) as {
+          sessionKey?: string
+          friendlyId?: string
+        }
+
+        const sessionKey =
+          typeof data.sessionKey === 'string' ? data.sessionKey : ''
+        const friendlyId =
+          typeof data.friendlyId === 'string' &&
+          data.friendlyId.trim().length > 0
+            ? data.friendlyId.trim()
+            : deriveFriendlyIdFromKey(sessionKey)
+
+        if (!sessionKey || !friendlyId) {
+          throw new Error('Invalid session response')
+        }
+
+        await queryClient.invalidateQueries({ queryKey: chatQueryKeys.sessions })
+        return { sessionKey, friendlyId }
+      } finally {
+        setCreatingSession(false)
       }
+    },
+    [queryClient, selectedService],
+  )
 
-      const sessionKey =
-        typeof data.sessionKey === 'string' ? data.sessionKey : ''
-      const friendlyId =
-        typeof data.friendlyId === 'string' && data.friendlyId.trim().length > 0
-          ? data.friendlyId.trim()
-          : deriveFriendlyIdFromKey(sessionKey)
+  const handleRunSimpleTask = useCallback(
+    async (serviceOverride?: string) => {
+      const targetSvc = serviceOverride || selectedService
+      setDispatchError('')
+      setBusyDemoService(targetSvc)
+      try {
+        let targetSessionKey =
+          forcedSessionKey ||
+          resolvedSessionKey ||
+          activeSessionKey ||
+          activeFriendlyId
+        let navigateFriendlyId = ''
 
-      if (!sessionKey || !friendlyId) {
-        throw new Error('Invalid session response')
+        if (isNewChat) {
+          const created = await createSessionForMessage(targetSvc)
+          targetSessionKey = created.sessionKey
+          navigateFriendlyId = created.friendlyId
+          setRecentSession(created.friendlyId)
+        }
+
+        const res = await fetch('/api/autoplan/agents/demo-task', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            service: targetSvc,
+            webclaw_session_key: targetSessionKey,
+          }),
+        })
+        const payload = (await res.json().catch(() => ({}))) as {
+          success?: boolean
+          error?: string
+          run?: { id?: string }
+        }
+        if (!res.ok || payload.success === false) {
+          throw new Error(payload.error || `HTTP ${res.status}`)
+        }
+        if (payload.run?.id) {
+          startRun(payload.run.id)
+        }
+        refreshHistory()
+        refreshAgents()
+        window.dispatchEvent(new CustomEvent('autoplan:event'))
+        if (navigateFriendlyId) {
+          navigate({
+            to: '/chat/$sessionKey',
+            params: { sessionKey: navigateFriendlyId },
+            replace: true,
+          })
+        }
+      } catch (err) {
+        setDispatchError(err instanceof Error ? err.message : String(err))
+      } finally {
+        setBusyDemoService(null)
       }
-
-      queryClient.invalidateQueries({ queryKey: chatQueryKeys.sessions })
-      return { sessionKey, friendlyId }
-    } finally {
-      setCreatingSession(false)
-    }
-  }, [queryClient])
+    },
+    [
+      activeFriendlyId,
+      activeSessionKey,
+      createSessionForMessage,
+      forcedSessionKey,
+      isNewChat,
+      navigate,
+      refreshAgents,
+      refreshHistory,
+      resolvedSessionKey,
+      selectedService,
+      startRun,
+    ],
+  )
 
   const send = useCallback(
     (body: string, helpers: ChatComposerHelpers) => {
@@ -381,7 +552,8 @@ export function ChatScreen({
               replace: true,
             })
           })
-          .catch(() => {
+          .catch((err) => {
+            setDispatchError(err instanceof Error ? err.message : String(err))
             removeHistoryMessageByClientId(
               queryClient,
               'new',
@@ -415,6 +587,7 @@ export function ChatScreen({
       onSessionResolved,
       queryClient,
       resolvedSessionKey,
+      selectedService,
       settings.thinkingLevel,
     ],
   )
@@ -422,6 +595,7 @@ export function ChatScreen({
   const startNewChat = useCallback(() => {
     setWaitingForResponse(false)
     setPinToTop(false)
+    setDispatchError('')
     clearHistoryMessages(queryClient, 'new', 'new')
     navigate({ to: '/new' })
     if (isMobile) {
@@ -437,7 +611,14 @@ export function ChatScreen({
     })
   }, [queryClient])
 
+  const handleToggleInspector = useCallback(() => {
+    setChatUiState(queryClient, function toggle(state) {
+      return { ...state, isInspectorOpen: !state.isInspectorOpen }
+    })
+  }, [queryClient])
+
   const handleSelectSession = useCallback(() => {
+    setDispatchError('')
     if (!isMobile) return
     setChatUiState(queryClient, function collapse(state) {
       return { ...state, isSidebarCollapsed: true }
@@ -567,25 +748,27 @@ export function ChatScreen({
       <div
         className={cn(
           'h-full overflow-hidden',
-          isMobile ? 'relative' : 'grid grid-cols-[auto_1fr]',
+          isMobile
+            ? 'relative'
+            : isInspectorOpen
+              ? 'grid grid-cols-[auto_1fr_auto]'
+              : 'grid grid-cols-[auto_1fr]',
         )}
       >
         {hideUi ? null : isMobile ? (
-          <>
-            <div
-              className={cn(
-                'fixed inset-y-0 left-0 z-50 w-[300px] transition-transform duration-200',
-                isSidebarCollapsed ? '-translate-x-full' : 'translate-x-0',
-              )}
-            >
-              {sidebar}
-            </div>
-          </>
+          <div
+            className={cn(
+              'fixed inset-y-0 left-0 z-50 w-[300px] transition-transform duration-200',
+              isSidebarCollapsed ? '-translate-x-full' : 'translate-x-0',
+            )}
+          >
+            {sidebar}
+          </div>
         ) : (
           sidebar
         )}
 
-        <main className="flex flex-col h-full min-h-0" ref={mainRef}>
+        <main className="flex flex-col h-full min-h-0 min-w-0" ref={mainRef}>
           <ChatHeader
             activeTitle={activeTitle}
             wrapperRef={headerRef}
@@ -596,7 +779,31 @@ export function ChatScreen({
             showExport={!isNewChat}
             usedTokens={activeSession?.totalTokens}
             maxTokens={activeSession?.contextTokens}
+            services={services}
+            selectedService={selectedService}
+            onSelectService={(svc) => void handleSelectService(svc)}
+            onRunSimpleTask={() => void handleRunSimpleTask()}
+            runningSimpleTask={busyDemoService !== null}
+            inspectorOpen={isInspectorOpen}
+            onToggleInspector={handleToggleInspector}
           />
+
+          {dispatchError ? (
+            <div
+              data-testid="dispatch-error-banner"
+              role="alert"
+              className="flex items-center justify-between border-b border-red-500/40 bg-red-500/10 px-4 py-1.5 text-xs text-red-600"
+            >
+              <span className="truncate">{dispatchError}</span>
+              <button
+                type="button"
+                onClick={() => setDispatchError('')}
+                className="ml-3 shrink-0 underline"
+              >
+                Dismiss
+              </button>
+            </div>
+          ) : null}
 
           {hideUi ? null : (
             <>
@@ -622,6 +829,16 @@ export function ChatScreen({
             </>
           )}
         </main>
+
+        {!hideUi && !isMobile && isInspectorOpen ? (
+          <AutoplanInspector
+            services={services}
+            chiefLlmStatus={chiefLlmStatus}
+            onRunSimpleTask={handleRunSimpleTask}
+            busyDemoService={busyDemoService}
+            onRefreshAgents={refreshAgents}
+          />
+        ) : null}
       </div>
     </div>
   )

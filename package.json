@@ -18,7 +18,7 @@
     "bump:webclaw:patch": "pnpm -C packages/webclaw version patch --no-git-tag-version",
     "bump:webclaw:minor": "pnpm -C packages/webclaw version minor --no-git-tag-version",
     "bump:webclaw:major": "pnpm -C packages/webclaw version major --no-git-tag-version",
-    "postinstall": "lefthook install"
+    "postinstall": "lefthook install || true"
   },
   "devDependencies": {
     "lefthook": "^1.11.1"

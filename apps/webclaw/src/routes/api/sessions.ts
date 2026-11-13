@@ -2,6 +2,10 @@ import { randomUUID } from 'node:crypto'
 import { createFileRoute } from '@tanstack/react-router'
 import { json } from '@tanstack/react-start'
 import { gatewayRpc } from '../../server/gateway'
+import {
+  isOpenClawGatewayConfigured,
+  proxyAutoplanJson,
+} from '../../server/autoplan'
 
 type SessionsListGatewayResponse = {
   sessions?: Array<Record<string, unknown>>
@@ -63,6 +67,9 @@ export const Route = createFileRoute('/api/sessions')({
     handlers: {
       GET: async () => {
         try {
+          if (!isOpenClawGatewayConfigured()) {
+            return await proxyAutoplanJson('/api/webclaw/sessions')
+          }
           const payload = await gatewayRpc<SessionsListGatewayResponse>(
             'sessions.list',
             {
@@ -84,6 +91,14 @@ export const Route = createFileRoute('/api/sessions')({
       },
       POST: async ({ request }) => {
         try {
+          if (!isOpenClawGatewayConfigured()) {
+            const rawBody = await request.text()
+            return await proxyAutoplanJson('/api/webclaw/sessions', {
+              method: 'POST',
+              body: rawBody || '{}',
+            })
+          }
+
           const body = (await request.json().catch(() => ({}))) as Record<
             string,
             unknown
@@ -112,7 +127,6 @@ export const Route = createFileRoute('/api/sessions')({
             throw new Error('gateway returned an invalid response')
           }
 
-          // Register the friendly id so subsequent lookups resolve quickly.
           await gatewayRpc<SessionsResolveResponse>('sessions.resolve', {
             key: friendlyId,
             includeUnknown: true,
@@ -137,6 +151,14 @@ export const Route = createFileRoute('/api/sessions')({
       },
       PATCH: async ({ request }) => {
         try {
+          if (!isOpenClawGatewayConfigured()) {
+            const rawBody = await request.text()
+            return await proxyAutoplanJson('/api/webclaw/sessions', {
+              method: 'PATCH',
+              body: rawBody || '{}',
+            })
+          }
+
           const body = (await request.json().catch(() => ({}))) as Record<
             string,
             unknown
@@ -198,6 +220,14 @@ export const Route = createFileRoute('/api/sessions')({
       },
       DELETE: async ({ request }) => {
         try {
+          if (!isOpenClawGatewayConfigured()) {
+            const url = new URL(request.url)
+            return await proxyAutoplanJson(
+              `/api/webclaw/sessions${url.search}`,
+              { method: 'DELETE' },
+            )
+          }
+
           const url = new URL(request.url)
           const rawSessionKey = url.searchParams.get('sessionKey') ?? ''
           const rawFriendlyId = url.searchParams.get('friendlyId') ?? ''

@@ -110,6 +110,16 @@ export function useChatStream({
             return
           }
           if (!parsed.event) return
+          if (
+            parsed.event === 'queue_updated' ||
+            parsed.event === 'run_started' ||
+            parsed.event === 'run_updated'
+          ) {
+            window.dispatchEvent(
+              new CustomEvent('autoplan:event', { detail: parsed }),
+            )
+            return
+          }
           if (parsed.event === 'chat' || parsed.event === 'agent') {
             const payloads: Array<StreamChatPayload | null> =
               parsed.event === 'chat'
